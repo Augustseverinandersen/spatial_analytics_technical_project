@@ -1,0 +1,528 @@
+---
+title: "Spatial Analytics Technical Project"
+author: "August Severin Andersen"
+date: "07-06-2023"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+
+```
+
+
+# 1. Importing Libraries
+Loading the following libraries which are needed to run the code.
+```{r libraries}
+library(sf)
+library(tidyverse)
+library(tmap)
+```
+
+# 2. Loading data
+Loading the two data sets _Shark_attacks.csv_ and _au.csv_. 
+```{r loading-datasets}
+shark_attacks <- read.csv(file = "../data/shark_attacks.csv", sep = ";") # Loading as a CSV file
+au_pop <- read.csv("../data/au.csv") # Loading as a CSV file
+```
+
+Loading the shape files for the map of Australia and for Australian States.
+```{r loading-shape-files}
+world_shape<- read_sf("../data/ne_50m_admin_0_countries/ne_50m_admin_0_countries.shp") # Loading world map
+australia_shape <- world_shape[world_shape$SOVEREIGNT == "Australia",] # Filtering only to get rows that contain Australia
+
+
+australia_states <- read_sf("../data/australia_Map/STE_2021_AUST_GDA2020.shp") # Loading the shape file for Australia States
+
+```
+
+# 3. Data Cleaning
+Cleaning the data for analysis.
+
+Replacing commas to full stops in latitude and longitude columns. This is done in order to make it a sf object.
+```{r replacing-comma-with-dot}
+columns <- c("Latitude", "Longitude") # The two columns that need cleaning.
+shark_attacks[columns] <- lapply(shark_attacks[columns], gsub, pattern = ",", replacement = ".") # For every row in the columns
+# Replace comma with full stop.
+```
+
+The column __Longitude__ contains empty spaces which need to be removed. And the two columns longitude and latitude are currently
+character columns they need to be numeric columns.
+```{r removing-spaces}
+shark_attacks <- shark_attacks[!(shark_attacks$Longitude == ""), ] # Removing empty spaces
+shark_attacks <- shark_attacks %>% mutate_at(c('Longitude', 'Latitude'), as.numeric) # Transforming column type
+```
+
+After transforming, the columns contain NA values that need to be removed.
+```{r drop-na}
+shark_attacks_clean <- shark_attacks %>% drop_na(Latitude) # Removing all NA values from Latitude column
+shark_attacks_cleaned <- shark_attacks_clean %>% drop_na(Longitude) # Removing all NA values from longitude column
+```
+
+The column __Victim.injury__ in the Shark Attack data set has values that are the same, but spelled differently. They need to be 
+grouped together.
+```{r grouping-values}
+shark_attacks_cleaned$Victim.injury <- ifelse(shark_attacks_cleaned$Victim.injury %in% c("injured", "Injured", "injury"), "injured", shark_attacks_cleaned$Victim.injury) # Renaming differently spelled words to be the same word.
+```
+
+The Australia shape file, and the State shape files have rows that I do not need. 
+```{r removing-rows}
+australia_shape <- australia_shape[-3,] # Removing third row, which is Heard Island and McDonald Islands.
+australia_states <- australia_states[-10,] # Removing tenth row which is not a State.
+
+```
+
+
+# 4. Spatial transformation
+
+Now that the data sets are cleaned, I can begin spatial transformation. The first step is to make them into SF objects
+and transform the CRS.
+```{r sf-objects}
+au_pop_crs <- st_as_sf(au_pop, coords = c("lng", "lat"), crs = 4326) # Creating SF object with CRS 4326
+shark_attacks_crs <- st_as_sf(shark_attacks_cleaned, coords = c("Longitude", "Latitude"), crs = st_crs(4326) )# Creating SF object with
+# CRS 4326
+
+au_pop_crs <- st_transform(au_pop_crs, crs = 3112) # Transforming the CRS to Australia's CRS
+shark_attacks_crs <- st_transform(shark_attacks_crs, crs = 3112) # Transforming the CRS to Australia's CRS
+
+```
+
+Currently, the Australia SF object is a MULTIPOLYON. I want it to be a POLYGON To make it a POLYGON, I first need to 
+unionize the strings and than cast it to a POLYGON.
+```{r casting}
+australia_shape <- st_cast(australia_shape, "MULTILINESTRING") # SF object to MULTILINESTRING
+australia_shape_union <- st_union(australia_shape) # Unionizing all geometries to one.
+australia_shape_polygon <- st_cast(australia_shape_union, "POLYGON") # Casting to a polygon
+```
+
+
+The Australia shape and States are already SF objects, but currently have the wrong CRS. 
+```{r transforming}
+australia_shape_polygon_crs <- st_transform(australia_shape_polygon, crs = 3112) # Transforming CRS to Australia CRS
+australia_states_crs <- st_transform(australia_states, crs = 3112) # Transforming CRS to Australia CRS
+
+```
+
+# 5. Spatial manipulation 
+## 5.1 Creating buffer 
+
+Now that my Australia shape has the correct CRS, I want to create a inverse buffer in order to only have cities located close 
+to the coast.
+```{r buffer}
+australia_shape_buffer <- st_buffer(australia_shape_polygon_crs, dist = -100000) # Creating an inverse buffer of 100 km.
+
+```
+
+## 5.1.2 Buffer Plot
+The plot below shows the buffer that is created (BLUE), and the map of Australia. I will select the cities that are located in
+the white line.
+```{r plot-buffer, echo=TRUE}
+
+plot(st_geometry(australia_shape_polygon_crs)) # Plotting Australia map
+plot(st_geometry(australia_shape_buffer), col = "blue", add = TRUE) # Plotting the buffer on top of the map
+
+
+```
+
+## 5.1.3 Selecting coastal cities
+After creating the buffer, I can now select the cities that do not intersect with the buffer.
+I start be checking if the CRS for my two SF objects are the same.
+```{r crs-checking, echo=TRUE}
+st_crs(au_pop_crs) == st_crs(australia_shape_buffer) # Seeing if the CRS for the buffer and my city data is the same.
+
+```
+Then I created a new variable to store a Boolean. If the City intersects with the buffer it returns TRUE.
+It returns FALSE if the city does not intersect with the buffer.
+```{r buffer-cities}
+cities <- lengths(st_intersects(au_pop_crs, st_sf(australia_shape_buffer))) > 0 # Finding which cities intersect.
+```
+Selecting all cities that are FALSE. These are the cities that do not intersect with the buffer, and thereby the cities that are
+100 km from the coast.
+```{r coastal-cities}
+costal_cities <- au_pop_crs[!cities,] # Selecting all cities that are false. 
+```
+
+# 6. Visualisation
+After cleaning the data, and making spatial transformation it is time to create visualizations. It will be using Tmap to create maps of the shark attacks in Australia, but I will also be using GGPLOT2 to create bar graphs and line graphs to better understand the data.
+
+## 6.1 Attacks pr Year
+The first visualization I will make is attacks pr year. This visualization is created to see the trend in shark attacks over 200 years.
+### 6.1.1 Counting attacks
+The first step is to count the number of attacks pr year.
+```{r incidents-count}
+shark_attack_year <- shark_attacks_crs %>% # Creating a pipe to count the number of Incidents pr year.
+  count(Incident.year) 
+
+```
+
+### 6.1.2 Plotting the attacks pr year
+Now that I have counted the attacks pr year, I am going to create a line plot to show the trend in attacks pr year.
+```{r incidents-plot}
+ggplot(shark_attack_year, aes(Incident.year, n)) + # Using ggplot to plot count of incident.year
+  geom_line(col= "blue", size = 1) + # Line color black
+  labs(title = "Attacks per Year", # Title
+       x = "Incident", # X axis title
+       y = "Count") + # Y axis title
+  scale_x_continuous(n.breaks = 10)+ # 10 breaks in x axis
+  scale_y_continuous(n.breaks = 20) # 20 breaks in y axis
+
+ggsave(path = "../figs", filename = "Attacks_per_year.png") # Saving the plot to folder figs
+
+```
+The plot shows that there is an increase in attacks throughout the years. There is a spike in the year 1929, and most attacks occurred
+in 2020. This plot will be discussed in the adjoining paper.
+
+## 6.2 Attacks per state
+The next visualization I will make is the number of attacks per state. This is done to see which states have the most attacks.
+The first step is to count the attacks per state
+```{r state-count}
+shark_attack_state <- shark_attacks_crs %>% # Creating a pipe 
+  group_by(State) %>% # Grouping the data frame by state 
+  count() # Counting how many times each state appears
+```
+
+After getting the count of each state, I can now plot it.
+```{r state-plot}
+ggplot(shark_attack_state, aes(reorder(State, -n), n)) + # Plotting the count, highest to lowest.
+  geom_col(fill = "blue")+
+  geom_text(aes(label = n), vjust = -0.2)+ # Adding label to each bar
+  labs(title = "Attacks per State", # Title
+       x = "State", # X axis title
+       y = "Count")  # Y axis title 
+
+ggsave(path = "../figs", filename = "Attacks_per_state.png") # Saving the plot to folder figs
+
+```
+Most attacks happened in the states of New South Wales and Queensland. This visualization will be discussed in the adjoining paper.
+
+## 6.3 Activity when attacked 
+Now I will look at which activity the victim was doing when attacked.
+The first step is to see all the unique values, to see if any are misspelled words.
+```{r activity, echo = TRUE}
+unique(shark_attacks_crs$Victim.activity)
+```
+The values that start with __other__ can be grouped together.
+
+```{r activity-group}
+shark_attack_activities <- shark_attacks_crs  # Creating a duplicate data frame.
+
+# All values that start with other, and empty values will be renamed to other.
+shark_attack_activities$Victim.activity <- ifelse(shark_attacks_crs$Victim.activity %in% c("other:floating", "other: standing in water", "other: hull scraping", "other: jetskiing; swimming", ""), "other", shark_attacks_crs$Victim.activity) #
+
+```
+
+After grouping some of the activities together, I can now count the occurrence of each activity.
+
+```{r activity-count}
+victim_activity_count <- shark_attack_activities %>%
+  count(Victim.activity)
+
+```
+
+After counting it I can now plot it.
+```{r activity-plot}
+ggplot(victim_activity_count, aes(reorder(Victim.activity, -n ), n))+ # Plotting activity by highest to lowest
+  geom_col(fill = "blue")+ # It should be a bar plot
+  geom_text(aes(label = n), vjust = -0.2)+ # Adding label to each bar
+  labs(title = "Count of Victim Activity", # Title
+       x = "Activity", # X axis title
+       y = "Count")+ # Y axis title
+  #scale_y_continuous(n.breaks = 10)+
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) # Tilting the x axis labels.
+
+ggsave(path = "../figs", filename = "Activity_count.png") # Saving the plot to folder figs
+
+```
+Swimming is the activity with the most attacks. This visualization will be discussed in the adjoining paper.
+
+## 6.4 Incidents per month and season
+Now I want to find out which month has the most attacks.
+The first step is to count the occurrence of each month.
+```{r month-count}
+attacks_pr_month <- shark_attacks_crs %>% # Creating pipe
+  group_by(Incident.month) %>% # grouping by month
+  count() # Counting occurrence of each month
+  
+```
+
+Now I can plot it.
+```{r month-plot}
+# Creating a variable to be used in the plot, to help with coloring the plot.
+monthly_colours = c("Summer", "Summer", "Autumn","Autumn","Autumn","Winter","Winter","Winter","Spring", "Spring", "Spring",  "Summer")
+
+
+ggplot(attacks_pr_month, aes(Incident.month, n, fill = monthly_colours))+ # Creating plot with incident month and count.
+  # Fill is the variable mounthly colors.
+  geom_col()+ # It should be a bar plot
+  geom_text(aes(label = n), vjust = -0.2)+ # Adding label to each bar
+  scale_x_continuous(breaks = 1:12, labels = month.name[1:12])+ # Scaling x axis, and turning month from numbers to letters.
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))+ # Tilting the x axis labels
+  labs(title = "Attacks per Month and Season",  # title
+       x = "Month", y = "Count", # x axis title
+       fill = "Season") + # Legend title
+  scale_fill_manual(values = c("Summer" = "red", "Autumn" = "yellow", "Winter" = "blue", "Spring" = "green")) # Specifying colors
+
+ggsave(path = "../figs", filename = "Attacks_per_month_and_season.png") # Saving the plot to folder figs
+```
+The month with the most attacks is January, and the season with the most attacks is Summer. This will be discussed in the
+adjoining paper.
+
+# 7. Plotting with Tmap
+Now that I have done some initial ggplot plotting, I will start plotting with Tmap.
+## 7.1 Plotting all attacks and costial cities 
+The first plot I will make is all shark attacks in Australia, and the coastal cities. 
+```{r australia-map}
+tmap_mode("plot") # Setting map mode to plot.
+
+australia_map <- tm_shape(australia_shape_polygon_crs)+ # Creating Australia shape  and saving in variable
+  tm_polygons() 
+
+population_map <- tm_shape(costal_cities)+ # Creating coastal city shape.
+  tm_dots(size = 0.3, 
+          col = "blue")
+
+shark_map <- tm_shape(shark_attacks_crs)+ # Shark attacks as red dots 
+  tm_dots(size = 0.3, col = "red", title = "Shark attacks")
+
+states <- tm_shape(australia_states_crs)+ # States as polygons
+  tm_polygons(alpha = 0.1,
+              col = "black",
+              lwd = 2,
+              title = "States")
+
+scale_bar <- tm_scale_bar(breaks = c(0, 500, 1000), # Scale bar kilometers
+                         text.size = 1,
+                         position = c("LEFT", "bottom"))
+
+compass <- tm_compass(position = c("RIGHT", "top"), # Compass
+                      type = "rose",
+                      size = 2 ) 
+
+credits <- tm_credits(text = "A. Andersen, 2023") # Credits
+
+
+layout <- tm_layout(main.title = "Shark Attacks Australia",
+                   bg.color = "lightblue",
+                   asp = 1) # Setting aspect ration of the map
+
+legend <- tm_add_legend(type = "fill",
+                        col = c("blue", "red"),
+                        labels = c("City", "Attack"),
+                        title = "Legend")                   
+                 
+# combining it all together to make one map 
+shark_attacks_australia_map <- australia_map + shark_map  + population_map + states + layout + credits + scale_bar + compass + legend
+
+shark_attacks_australia_map
+
+tmap_save(shark_attacks_australia_map, "../figs/shark_attacks_australia.png") # Saving the map in folder figs.
+```
+The map gives a good overview of where that attacks happened, and where the coastal cities are, but not much specific
+information can be extracted from the map.
+
+## 7.2 Creating map with five most aggressive sharks.
+The next visualization is a map showing attacks per shark species. 
+### 7.2.1 Finding the sharks with the most attacks 
+However, there are 25 different species, which is too many to plot. So, I will find the 5 species with the most attacks. 
+The first step is to count how many attacks each species has done.
+
+```{r shark-type-count, echo = TRUE}
+shark_type_count <- table(shark_attacks_crs$Shark.common.name) # Creating a table of number of attacks per species.
+sort(shark_type_count) # Sorting the table 
+```
+Creating a duplicate of the original data frame, so I do not mess up the data.
+```{r duplicate}
+shark_attack_count <- shark_attacks_crs # Creating duplicate.
+```
+
+All the sharks that are not the top five species will be renamed to __other__.
+```{r shark-renaming}
+shark_attack_count$Shark.common.name <- ifelse(shark_attack_count$Shark.common.name %in% c("blind shark", "dogfish", "port jackson shark", "school shark", "sevengill shark", "silvertip shark", "unknown", "broadnose sevengill shark", "shortfin mako shark", "galapagos shark", "blacktip reef shark", "dusky shark", "hammerhead shark ", "lemon shark", "whitetip reef shark", "grey reef shark", "grey nurse shark", "bronze whaler shark", "unknown", ""), "other", shark_attack_count$Shark.common.name)
+
+```
+
+### 7.2.2 Creating the plot
+```{r shark-type-plot}
+tmap_mode("plot") # Setting the map mode to plot
+
+australia_map <- tm_shape(australia_shape_polygon_crs)+  # Creating the shape of Australia
+  tm_polygons()
+
+shark_map <- tm_shape(shark_attack_count)+ # Plotting the attacks, with color set as shark type.
+  tm_dots(size = 0.3, col = "Shark.common.name", palette=c("white shark" = "red", "tiger shark" = "green", "wobbegong" = "black", "bull shark" = "pink", "whaler shark" = "yellow", "other" = "blue"), title = "Shark Name")
+
+states <- tm_shape(australia_states_crs)+ # Creating the states.
+  tm_polygons(alpha = 0.1,
+              col = "black",
+              lwd = 2)
+
+scale_bar <- tm_scale_bar(breaks = c(0, 500, 1000), # Scale bar kilometers
+                         text.size = 1,
+                         position = c("LEFT", "bottom"))
+
+compass <- tm_compass(position = c("RIGHT", "top"), # Compass
+                      type = "rose",
+                      size = 2 ) 
+
+credits <- tm_credits(text = "A. Andersen, 2023") # Credits
+
+layout <- tm_layout(main.title = "Shark Attack Species", # Layout
+                   bg.color = "lightblue",
+                   asp = 1)
+
+shark_attack_species_map <- australia_map + shark_map + states + scale_bar + compass + credits + layout # Combining into one map
+
+shark_attack_species_map
+
+tmap_save(shark_attack_species_map, "../figs/shark_attack_species.png") # Saving the map in folder figs.
+```
+
+The created map shows how shark attacks by species depend on where you are. The south of Australia is dominated by White Sharks,
+while northern Australia has more species. This is further discussed in the adjoining paper.
+
+## 7.3 Plotting states with most provoked and unprovoked attacks 
+Next, I will create a map of the states with the most provoked and unprovoked attacks. In order to do that, I first need to count
+the provoked and unprovoked attack for each state.
+
+```{r provoked-unprovoked-count}
+provoked_unprovoked_count <- shark_attacks_crs %>% # Creating a pipe 
+  group_by(State, Provoked.unprovoked) %>% # Grouping by state and provoked.unprovoked
+  count() %>% # counting each states provoked and unprovoked attacks.
+  filter(Provoked.unprovoked != "") # Filtering out empty values
+```
+
+### 7.3.1 Ploting the count with ggplot
+Before creating the Tmap, I will first create a bar plot. This will make it easier to see which state, has the most 
+provoked and unprovoked attacks. 
+```{r provoked-unprovoked-plot}
+ggplot(provoked_unprovoked_count, aes(State, n, fill = Provoked.unprovoked)) + # Plotting State and count.
+  geom_col(position = "dodge")+ # Bar plot, with the columns side by side.
+  labs(title = "Counts of Provoked and Unprovoked Incidents by State", # Title
+       x = "State", # X axis title
+       y = "Count", # Y axis title
+       fill = "Type")+
+  scale_fill_manual(values = c("provoked" = "red", "unprovoked" = "blue")) + # Setting colors for the legend.
+  scale_y_continuous(n.breaks = 10) # Y Axis breaks
+
+ggsave(path = "../figs", filename = "Provoked_Unprovoked_per_State.png") # Saving the plot to folder figs
+
+```
+The bar graph shows that New South Wales and Queensland have the most provoked and unprovoked attacks. To see if there is a pattern 
+in the attacks, I will plot the two states.
+### 7.3.2 Plotting New South Wales and Queensland.
+
+```{r nsw-qld-plot}
+new_south_wales_queensland <- australia_states_crs %>% # Filtering to only have rows of New South Wales and Queensland
+  filter(STE_NAME21 %in% c("New South Wales", "Queensland"))
+
+nsw_qld_shark_attacks <- shark_attacks_crs %>% # Filtering to only have rows of NSW and QLD
+  filter(State == c("NSW", "QLD")) %>%
+  filter(!(UIN %in% c(197, 1207, 198, 1025, 893, 1119, 1122, 1126))) # Excluding rows with missing data, or wrong location
+
+
+tmap_mode("plot") # Tmap mode plot
+
+shark_attack_nsw <- tm_shape(nsw_qld_shark_attacks)+ # Creating shape of shark attacks in the two states.
+  tm_dots(size = 0.3, col = "Provoked.unprovoked", palette= c("provoked" = "red", "unprovoked" = "blue"), legend.show = TRUE, title = "Attack Type") # Specifying legend title and colors
+
+nsw <- tm_shape(new_south_wales_queensland)+ # Map of New South Wales and Queensland.
+  tm_polygons(alpha = 0.1,
+              col = "black",
+              lwd = 2)
+
+layout <- tm_layout(main.title = "Shark Attacks in NSW and QLD", # Map title
+                   bg.color = "lightblue") # Background color
+
+scale_bar <- tm_scale_bar(breaks = c(0, 150, 300), # Scale bar
+                         text.size = 1,
+                         position = c("right", "bottom"))
+
+nsw_qld_attacks <- shark_attack_nsw + nsw + layout + scale_bar + credits# Combining
+
+nsw_qld_attacks
+
+tmap_save(nsw_qld_attacks, "../figs/shark_attack_type_nsw_qld.png") # Saving the map in folder figs.
+
+```
+
+
+It looks like that more provoked attacks happened in Queensland, whilst New South Wales is dominated by unprovoked attacks.
+This will be discussed in the adjoining paper.
+
+## 7.4 Injury level pr state
+The next visualization I will create is injury level by state. There are three levels. __Uninjured, Injured__, and __Fatal__.
+The first step is to count each injury occurrence pr state
+```{r injury-count}
+victim_injury_count <- shark_attacks_crs %>% # Creating pipe
+  group_by(State, Victim.injury) %>% # Grouping by State and victim injury
+  count() # Counting the injury per stat
+```
+
+Now that I have counted each injury per state I can plot it using ggplot.
+
+```{r injury-plot}
+ggplot(victim_injury_count, aes(State, n, fill = Victim.injury)) + # Plotting State and count, with fill set to injury type.
+  geom_col(position = "dodge")+ # Columns should be next to each other
+  labs(title = "Victim Injury by State", # Title
+       x = "State", # X axis title
+       y = "Count", # Y axis title
+       fill = "Injury Type") + # Legend title
+  scale_fill_manual(values = c("fatal" = "red", "injured" = "blue", "uninjured" = "green"))+ # Setting colors to injury type
+  scale_y_continuous(n.breaks = 10) # 10 breaks in y axis
+
+
+ggsave(path = "../figs", filename = "Injury_per_state.png") # Saving the plot to folder figs
+```
+The state with the most injured is NSW, the state with the most uninjured is also NSW, but the state with the most fatal attacks is QLD.
+
+### 7.4.1 Plotting Queensland Injuries.
+To see where the injuries occurred, I will plot them on a map of the state of Queensland.
+```{r injury-qld-plot}
+
+queensland <- australia_states_crs %>% # Filtering to only have rows of Queensland
+  filter(STE_NAME21 == c("Queensland"))
+
+qld_shark_attacks <- shark_attacks_crs %>% # Filtering to only have rows of  QLD
+  filter(State == c("QLD")) 
+
+
+tmap_mode("plot") # Tmap mode plot
+
+shark_attack_qld <- tm_shape(qld_shark_attacks)+ # Creating shape of shark attacks in the two states.
+  tm_dots(size = 0.3, col = "Victim.injury", palette= c("fatal" = "red", "uninjured" = "green", "injured" = "blue"), legend.show = TRUE, title = "Injury level") # Specifying legend title and colors
+
+qld <- tm_shape(queensland)+ # Map of New South Wales and Queensland.
+  tm_polygons(alpha = 0.1,
+              col = "black",
+              lwd = 2)
+
+layout <- tm_layout(main.title = "Injury level in Queensland", # Map title
+                   bg.color = "lightblue",# Background color
+                   asp = 2) 
+
+scale_bar <- tm_scale_bar(breaks = c(0, 150, 300), # Scale bar
+                         text.size = 1,
+                         position = c("right", "top"))
+
+qld_attacks <- shark_attack_qld + qld + layout + scale_bar + credits# Combining
+
+qld_attacks
+
+tmap_save(qld_attacks, "../figs/Injuries_Queensland.png") # Saving the map in folder figs.
+```
+
