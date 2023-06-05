@@ -8,7 +8,7 @@ The urban coastal nation Australia is forecasted to have a population increase o
 For this technical project, I have used my 3-year-old HP Envy x360 computer, with 8 GP RAM, on a Windows 11 operating system. I worked on the desktop version of R (4.2.2) and RStudio 2022.12.0 3533.
 
 ## Contents 
-- ***code*** this folder contains an R markdown file. The *rmd* is used to create visualizations and maps based on spatial data 
+- ***code*** this folder contains an R markdown file, and a HTML file of the markdown file. [Click here]() to view the HTMl file.
 - ***data*** this folder contains two CSV files and two folders.
   - [au.csv](https://simplemaps.com/data/au-cities) contains location and population of 323 Australian cities. MIT License
   - [shark_attacks.csv](https://zenodo.org/record/7608411#.ZEZtSXZBxD8 ) contains 1201 reported shark attacks from 1791 until 2023. MIT license
